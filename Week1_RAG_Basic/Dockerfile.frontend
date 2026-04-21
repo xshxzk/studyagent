@@ -1,0 +1,15 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 复制你的前端代码
+COPY day7_frontend.py .
+
+# 暴露 8501 端口
+EXPOSE 8501
+
+# 启动 Streamlit
+CMD ["streamlit", "run", "day7_frontend.py", "--server.address=0.0.0.0"]

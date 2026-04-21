@@ -1,0 +1,14 @@
+# 忽略所有的环境变量文件 (极其重要！)
+**/.env
+.env
+
+# 忽略 Python 缓存
+**/__pycache__/
+**/*.pyc
+
+# 忽略本地向量数据库缓存
+**/chroma_db/
+**/faiss_index/
+
+# 忽略 PDF 等大体积数据文件 (GitHub 不适合传大文件)
+**/*.pdf

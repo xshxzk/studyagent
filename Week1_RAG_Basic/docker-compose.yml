@@ -1,0 +1,19 @@
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    container_name: rag_backend
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "8501:8501"
+    container_name: rag_frontend
+    depends_on:
+      - backend  # 确保后端先启动，前端再启动

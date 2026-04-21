@@ -1,0 +1,12 @@
+# 告诉 Docker 打包时忽略这些垃圾文件
+__pycache__/
+.git/
+*.pdf
+chroma_db/
+faiss_index/
+day1_*.py
+day2_*.py
+day3_*.py
+day4_*.py
+day5_*.py
+day6_*.py
