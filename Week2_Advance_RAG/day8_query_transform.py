@@ -128,4 +128,4 @@ print(f"🧠 大模型盲猜生成的“假学术段落”:\n   {fake_document}\
 hyde_results = vector_store.similarity_search_with_score(fake_document, k=1)
 print(f"🎯 HyDE 策略检索命中的真实文档 (距离得分: {hyde_results[0][1]:.4f}):")
 print(f"  -> {hyde_results[0][0].page_content}")
-print("=" * 70)
+print("=" * 70)  
