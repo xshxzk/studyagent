@@ -63,7 +63,7 @@ if prompt := st.chat_input("请提问，例如：这篇论文研究了什么？"
             try:
                 # 请求 FastAPI 的 /api/chat 接口
                 response = requests.post(
-                    "http://127.0.0.1:8000/api/chat",
+                    "http://backend:8000/api/chat",
                     json={"query": prompt},
                     timeout=30
                 )
