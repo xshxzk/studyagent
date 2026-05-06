@@ -44,6 +44,7 @@ HyDE（Hypothetical Document Embeddings）是一种极具创意的算法，其�
     * **原理**：引入独立的重排大模型（如 Cohere 或 BGE-Reranker）。
     * **形象比喻**：**“终审大 Boss”**。
     * **底层差异（交叉编码器 Cross-Encoder）**：它不再算向量距离，而是把“问题”和前几步筛选出的“候选文章”首尾相连拼在一起（面对面交流），喂给模型进行极度深度的注意力机制计算。速度最慢，但精度最高。它打出的 `relevance_score` 决定了最终喂给大语言模型的 Top-1 文档。
+    * 经常用的重排模型：cohere是联网的一个可以公共的重排模型，BGE是一个可以下载到本地的重排模型
 
 ---
 
@@ -61,3 +62,185 @@ HyDE（Hypothetical Document Embeddings）是一种极具创意的算法，其�
 不再依赖容易过时的 LangChain 官方封装，而是回到纯正的 Python 数据流：
 1.  **手写 RRF 算法**：利用 Python 的字典键值对叠加特性，自己写 `for` 循环实现积分融合，透明且永不报错。
 2.  **裸调底层重排模型**：直接使用 `sentence-transformers` 库的 `CrossEncoder`。自己把 Query 和 Doc 拼成一对 (Pairs)，调用 `predict` 方法算出浮点数分数。这才是最纯粹、性能最高的工业级流水线写法。
+
+# Day10-11: RAGAs(RAG评估框架)
+
+## 1.评估框架中指标：
+
+`Context Precision` (上下文精度)：搜回来的资料，有用的在不在最前面？
+
+`Context Recall` (上下文召回率)：回答这个问题需要的知识，你搜全了吗？
+
+`Faithfulness` (忠实度)：大模型是不是老老实实看着检索到的资料回答的？有没有“幻觉”（胡编乱造）？
+
+`Answer Relevancy` (回答相关性)：大模型的回答，真的切中用户的问题了吗？
+
+## 2.实现方式：
+
+### (1)上下文精度 (Context Precision) —— 考察“排兵布阵”
+
+**核心目的**：检查真正有用的文档，是不是被排在了检索结果的最前面。
+
+**参与元素**：`question` (问题)、`contexts` (检索资料)、`ground_truth` (标准答案) **大模型执行步骤**：
+
+1. **逐篇审判（二元分类）**：RAGAs 把 `contexts` 里的文章按顺序一篇篇拿出来。问裁判大模型：“结合标准答案来看，这篇文章对回答用户问题有帮助吗？” 大模型只能回答 1（有用）或 0（没用）。
+2. **加权算分（位置惩罚）**：如果大模型判定第一篇文章有用，得满分；如果判定第一篇没用，第二篇才有用，分数就会大打折扣。
+   - *所以，用 BGE 重排（Rerank）把有用的文章顶到第一名，这个分数就会瞬间飙升。*    
+
+### (2)上下文召回率 (Context Recall) —— 考察“海底捞针”
+
+**核心目的**：检查回答这个问题所必须的知识点，系统是不是全都搜回来了？有没有漏掉关键信息？ 
+
+**参与元素**：`ground_truth` (标准答案)、`contexts` (检索资料) **大模型执行步骤**：
+
+1. **拆解标准答案**：RAGAs 让裁判大模型把你的 `ground_truth` 拆解开。比如你的标准答案有三个要点。
+2. **寻找证据**：裁判大模型会拿着这三个要点，去庞大的 `contexts` 堆里翻找：“第一点提到了吗？第二点提到了吗？”
+3. **计算得分**：`分数 = (在 contexts 中找到证据的要点数量) / (标准答案的总要点数量)`。如果标准答案有 3 个核心点，你的检索系统只搜回来了 2 个，得分就是 0.66。
+
+### (3). 忠实度 (Faithfulness) —— 专门抓“幻觉”
+
+**核心目的**：检查大模型的回答是不是脱离了检索到的资料，自己在胡编乱造。 
+
+**参与元素**：`question` (问题)、`contexts` (检索资料)、`answer` (生成的回答) **大模型执行步骤**：
+
+1. **拆解陈述（逆向提取）**：RAGAs 首先给裁判大模型下指令，让它把生成的 `answer` 拆解成一条条独立的“陈述句”。
+   - *例如回答是“TKFM框架能去云，因为它是深度学习”。大模型会把它拆成：①TKFM能去云；②TKFM是深度学习。*
+2. **逐条核对（逻辑推理）**：RAGAs 拿着这些拆解出来的陈述句，去和 `contexts`（检索到的原文）对比。问裁判大模型：“根据原文，这句话能推导出来吗？”
+3. **计算得分**：`分数 = (原文能支撑的陈述句数量) / (总陈述句数量)`。如果有两句话，一句原文有，一句原文没有（幻觉），得分就是 0.5。
+
+### (4). 回答相关性 (Answer Relevancy) —— 专治“答非所问”
+
+**核心目的**：检查回答是否直接切中了用户的原始问题。 
+
+**参与元素**：`question` (问题)、`answer` (生成的回答) **大模型执行步骤**：
+
+1. **逆向猜问题（反向生成）**：这是最神奇的一步！RAGAs **不看**用户的原始问题。它直接把生成的 `answer` 扔给裁判大模型，要求它：“只看这个回答，请你倒推、猜测出 3 个可能产生这个回答的用户问题”。
+2. **向量相似度对比（计算距离）**：RAGAs 会调用 Embedding 向量模型，把用户**真实的 `question`** 和大模型**猜出来的 3 个假问题**分别转成向量，计算它们的余弦相似度（Cosine Similarity）。
+3. **计算得分**：取这 3 个相似度的平均值。如果你答非所问，大模型猜出来的问题肯定和真实问题南辕北辙，相似度就会极低。
+
+# Day12: 生产级向量数据库 Milvus
+
+## 1. 今日目标
+
+Day12 的核心目标是把 Week2 前半段使用的本地向量检索思维，升级为生产级向量数据库思维。
+
+之前的 FAISS 更像是 Python 进程里的本地向量索引；Milvus 则是一个独立运行的向量数据库服务。Python 不再直接“拥有”索引，而是通过 SDK 连接 Milvus，完成 Collection 创建、数据写入、索引构建和向量搜索。
+
+## 2. Docker Compose 启动了什么
+
+本次使用 `docker-compose.milvus.yml` 启动了 3 个核心服务：
+
+| 服务 | 作用 | 通俗理解 |
+| --- | --- | --- |
+| `milvus-standalone` | Milvus 主服务，负责向量写入、索引、搜索 | 向量数据库本体 |
+| `milvus-etcd` | 存储 Collection、Schema、索引状态等元信息 | Milvus 的登记本 |
+| `milvus-minio` | 存储向量数据、索引文件等大对象 | 本地版对象存储 |
+
+Python SDK 通过 `localhost:19530` 连接 Milvus。运行 `docker compose -f docker-compose.milvus.yml ps` 后，三个容器均为 `healthy`，说明本地 Milvus Standalone 环境启动成功。
+
+## 3. Collection 与字段设计
+
+本次创建的 Collection 名称：
+
+```text
+week2_rag_docs
+```
+
+字段设计：
+
+| 字段 | 类型 | 作用 |
+| --- | --- | --- |
+| `id` | INT64 | 文档 chunk 主键 |
+| `text` | VARCHAR | 文档 chunk 原文 |
+| `source` | VARCHAR | 文档来源标识 |
+| `embedding` | FLOAT_VECTOR, dim=384 | 文档语义向量 |
+
+`dim=384` 的原因是当前使用的 `all-MiniLM-L6-v2` embedding 模型输出 384 维向量。Milvus 的向量字段维度必须与 embedding 模型输出维度一致，否则无法正确插入和搜索。
+
+## 4. 本次完成的两个阶段
+
+### 离线入库阶段
+
+对应脚本：`day12_milvus_basic.py`
+
+完成流程：
+
+```text
+连接 Milvus
+-> 删除旧测试 Collection
+-> 创建 week2_rag_docs
+-> 使用 all-MiniLM-L6-v2 生成文档向量
+-> 插入 5 条遥感文档
+-> 为 embedding 字段创建 IVF_FLAT + COSINE 索引
+-> load Collection
+-> 执行 Top 3 检索验证
+```
+
+其中 `create_index(collection)` 的作用是为 `embedding` 向量字段建立检索索引。可以理解为给向量字段建立“搜索加速目录”，让 Milvus 在大规模数据中更快找到与 query embedding 最相似的文档 embedding。
+
+### 在线查询阶段
+
+对应脚本：`day12_milvus_search_only.py`
+
+完成流程：
+
+```text
+连接已有 Milvus
+-> 检查 week2_rag_docs 是否存在
+-> load Collection
+-> 将用户问题转成 query embedding
+-> Milvus search Top 3
+-> 输出 source、text 和相似度分数
+```
+
+这个脚本更接近真实 RAG 在线查询链路。真实项目中不会每次用户提问都删除 Collection、重新插入数据，而是提前完成离线入库，在线阶段只负责查询。
+
+## 5. 检索验证结果
+
+测试问题 1：
+
+```text
+青藏高原湖泊的封冻期和消融期主要受哪些因素影响？
+```
+
+Top 1 命中：
+
+```text
+source: lake_ice
+```
+
+说明 Milvus 能够根据问题语义召回湖冰物候相关文档。
+
+测试问题 2：
+
+```text
+MCD43A4 数据集为什么要严格处理 QA 波段？
+```
+
+Top 1 命中：
+
+```text
+source: mcd43a4_qa
+```
+
+说明 Milvus 能够针对专业关键词和语义描述召回 QA 波段相关文档。
+
+## 6. FAISS、Chroma、Milvus 对比
+
+| 向量库 | 适合阶段 | 优点 | 局限 |
+| --- | --- | --- | --- |
+| FAISS | 本地原型、算法实验 | 简单、快、适合单机实验 | 服务化、权限、运维和数据管理能力弱 |
+| Chroma | 学习期、轻量 RAG 项目 | 上手简单，支持持久化 | 大规模生产能力和集群能力有限 |
+| Milvus | 生产级、大规模向量检索 | 服务化、索引丰富、可扩展、适合工程部署 | 部署组件更多，概念和运维成本更高 |
+
+## 7. 今日关键理解
+
+Milvus 在 RAG 系统中的位置：
+
+```text
+离线：文档 -> chunk -> embedding -> Milvus
+在线：query -> embedding -> Milvus search -> context -> LLM
+```
+
+FAISS 到 Milvus 的升级，本质不是改 Prompt，也不是改 LLM，而是把“向量召回层”从本地库替换为独立的数据库服务。这样系统才更接近可部署、可维护、可扩展的生产级 RAG 架构。
+
