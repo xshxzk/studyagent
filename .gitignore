@@ -9,6 +9,8 @@
 # 忽略本地向量数据库缓存
 **/chroma_db/
 **/faiss_index/
+**/volumes/
+**/parsed_outputs/
 
 # 忽略 PDF 等大体积数据文件 (GitHub 不适合传大文件)
 **/*.pdf

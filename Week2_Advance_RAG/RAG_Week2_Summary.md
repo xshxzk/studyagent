@@ -244,3 +244,206 @@ Milvus 在 RAG 系统中的位置：
 
 FAISS 到 Milvus 的升级，本质不是改 Prompt，也不是改 LLM，而是把“向量召回层”从本地库替换为独立的数据库服务。这样系统才更接近可部署、可维护、可扩展的生产级 RAG 架构。
 
+
+# Day13: 高级数据处理与复杂 PDF 解析
+
+## 1. 今日目标
+
+Day13 的核心目标是补齐 RAG 系统最前置的数据入口能力：把复杂 PDF 从“不可直接检索的版面文件”解析成“可入库、可追踪、可评估的结构化 chunks”。
+
+前面 Day8-Day12 已经完成了查询改写、混合检索、重排、RAGAs 评估和 Milvus 入门。今天的重点不是继续调 Prompt，而是处理 RAG 系统的原材料质量。真实工程中，如果 PDF 解析出来的文本存在乱码、空页、表格错乱、页眉页脚噪声或元数据缺失，后面的 Embedding、Hybrid Search、Rerank 和 Faithfulness 评估都会被污染。
+
+## 2. 本次实现的解析流程
+
+对应脚本：
+
+```text
+day13_pdf_parse_baseline.py
+```
+
+处理流程：
+
+```text
+读取 PDF
+-> 按页提取文本
+-> 清洗空字符、多余空格和连续换行
+-> 过滤空页或过短页
+-> 按固定窗口切分 chunk
+-> 为每个 chunk 添加 source、page、chunk_id、text_length 元数据
+-> 输出 JSONL 和 Markdown 解析质量报告
+```
+
+输出文件：
+
+```text
+parsed_outputs/day13_chunks.jsonl
+parsed_outputs/day13_parse_report.md
+```
+
+其中 JSONL 面向后续程序入库，每一行是一条结构化 chunk；Markdown 报告面向人工检查，用于确认解析质量。
+
+## 3. 运行结果
+
+本次测试 PDF：
+
+```text
+2023 - Multi-sensor detection of spring breakup phenology of Canada's lakes.pdf
+```
+
+解析指标：
+
+| 指标 | 结果 |
+| --- | --- |
+| PDF 总页数 | 19 |
+| 成功解析页数 | 19 |
+| 空页或过短页 | 0 |
+| Chunk 数量 | 148 |
+| 最短 Chunk 长度 | 140 |
+| 最长 Chunk 长度 | 900 |
+| 平均 Chunk 长度 | 848.53 |
+
+这个结果说明该 PDF 是文本型 PDF，不是纯扫描件，因此 PyMuPDF 可以直接提取文本，不需要先做 OCR。
+
+## 4. 解析质量观察
+
+优点：
+
+- 没有明显乱码。
+- 19 页全部成功解析。
+- Chunk 带有 `source`、`page`、`chunk_id` 和 `text_length`，后续可以追踪答案引用来源。
+- 平均 chunk 长度接近 900 字符，适合作为第一版 RAG 入库粒度。
+
+存在的问题：
+
+- 第 1 页包含期刊名、版权信息、作者单位等页眉和元信息，会带来少量检索噪声。
+- 固定字符窗口会切断句子，例如英文单词可能跨 chunk 断开。
+- 当前版本没有识别标题、表格、图注等版面结构。
+
+## 5. PyMuPDF、Unstructured、MinerU/Docling 的定位
+
+| 工具 | 适合场景 | 优点 | 局限 |
+| --- | --- | --- | --- |
+| PyMuPDF | 文本型 PDF 的快速解析基线 | 轻量、稳定、安装简单、速度快 | 不理解复杂版面结构，表格和标题层级较弱 |
+| Unstructured | 需要识别标题、段落、表格等文档元素 | 更接近生产级文档解析，输出元素类型 | 依赖更重，PDF 解析环境更容易出问题 |
+| MinerU / Docling | 论文、报告、复杂版面、OCR 场景 | 对复杂 PDF 和结构化抽取更强 | 部署和模型依赖更重，学习期成本更高 |
+
+学习期的合理路线是先用 PyMuPDF 建立稳定基线，再在需要处理表格、扫描件或复杂论文版面时引入 Unstructured、MinerU 或 Docling。
+
+## 6. 对 RAG 效果的影响
+
+文档解析质量会直接影响：
+
+- **Context Recall**：如果页面漏解析或表格丢失，关键证据根本进不了知识库。
+- **Context Precision**：如果页眉页脚、版权信息、参考文献噪声太多，检索结果会被无关文本挤占。
+- **Faithfulness**：如果 chunk 断裂严重或上下文不完整，LLM 更容易补全不存在的信息。
+- **Answer Relevancy**：如果 chunk 粒度不合适，回答容易抓到局部词而偏离用户问题。
+
+因此，生产级 RAG 不能只关注模型和向量库，也必须重视文档解析、清洗、chunk 策略和 metadata 设计。
+
+## 7. 下一步计划
+
+Day14 可以把 `parsed_outputs/day13_chunks.jsonl` 接入 Milvus 入库流程，将 Day12 的 5 条手写测试文档升级为真实 PDF chunks。
+
+建议升级方向：
+
+```text
+day13_chunks.jsonl
+-> embedding
+-> Milvus Collection
+-> Milvus search
+-> Hybrid Search
+-> Rerank
+-> RAGAs 评估
+```
+
+同时可以继续优化 Day13 脚本：
+
+- 增加按段落或句子边界切分，减少固定字符切断问题。
+- 增加页眉页脚清洗规则。
+- 增加 Unstructured 解析版本，对比元素级解析效果。
+- 为每条 chunk 增加 `section_title`、`doc_type` 等更丰富 metadata。
+
+## 8. Unstructured 元素级解析补充
+
+为补齐路线图中“使用 Unstructured/MinerU 解析包含表格、图片的复杂 PDF”的要求，本次额外实现了 Unstructured 解析脚本：
+
+```text
+day13_unstructured_parse.py
+```
+
+运行前需要安装：
+
+```powershell
+pip install "unstructured[pdf]"
+pip install unstructured-inference
+```
+
+安装过程中出现了依赖冲突提示，主要是 `unstructured` 升级了 `pydantic`、`aiofiles`、`beautifulsoup4`、`protobuf` 等包，与当前环境中的 `crewai` 版本要求不一致。这说明 Agent/RAG 工具链依赖较重，后续学习时最好拆分环境，例如：
+
+```text
+rag_study_env
+agent_study_env
+```
+
+本次 Unstructured 使用 `strategy="fast"` 成功解析 PDF，输出文件：
+
+```text
+parsed_outputs/day13_unstructured_elements.jsonl
+parsed_outputs/day13_unstructured_report.md
+```
+
+解析结果：
+
+| 指标 | 结果 |
+| --- | --- |
+| 元素数量 | 425 |
+| 覆盖页数 | 19 |
+| 最短元素长度 | 1 |
+| 最长元素长度 | 2512 |
+| 平均元素长度 | 254.68 |
+
+元素类型统计：
+
+| 元素类型 | 数量 |
+| --- | ---: |
+| NarrativeText | 223 |
+| Title | 108 |
+| UncategorizedText | 63 |
+| Header | 18 |
+| ListItem | 12 |
+| Footer | 1 |
+
+终端中出现的警告：
+
+```text
+Cannot set non-stroke color because expected 4 components but got [1]
+No languages specified, defaulting to English.
+```
+
+这些属于 PDF 版面颜色和语言默认配置相关的解析警告，不影响最终输出。
+
+## 9. PyMuPDF 与 Unstructured 实测对比
+
+| 维度 | PyMuPDF baseline | Unstructured |
+| --- | --- | --- |
+| 输出粒度 | 页面文本再切 chunk | 文档元素 |
+| 输出数量 | 148 chunks | 425 elements |
+| 元数据 | source、page、chunk_id、text_length | source、page、type、coordinates、links、filetype 等 |
+| 结构识别 | 弱 | 较强，可识别 Title、NarrativeText、Header、ListItem |
+| 安装复杂度 | 低 | 高，依赖多，容易与 Agent 框架冲突 |
+| 文本质量 | 连续性较好，但有页眉页脚噪声 | 结构更丰富，但可能出现空格丢失和类型误判 |
+
+本次样例中，Unstructured 成功识别了 `NarrativeText`、`Title`、`Header`、`ListItem` 等元素类型，也保留了坐标、页码、链接等 metadata。但它也存在一些问题：
+
+- 部分期刊页眉和版权信息被识别为 `Title`。
+- 个别文本出现空格丢失，例如 `RemoteSensingofEnvironment295(2023)113656`。
+- 当前 `strategy="fast"` 没有识别出 `Table`，说明如果要处理复杂表格，可能需要尝试 `strategy="hi_res"` 或改用 MinerU/Docling。
+
+因此，今天的核心结论是：
+
+```text
+PyMuPDF 适合作为稳定 baseline；
+Unstructured 适合补充文档结构 metadata；
+但任何解析工具的输出都必须经过质量检查、清洗和评估，不能直接无脑入库。
+```
+
