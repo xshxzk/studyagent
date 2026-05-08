@@ -20,8 +20,11 @@ MIN_PAGE_TEXT_LENGTH = 80
 def clean_text(text: str) -> str:
     """Normalize whitespace while keeping text readable for RAG chunks."""
     text = text.replace("\x00", " ")
+    text = text.replace("\u00ad\n", "")
+    text = text.replace("\u00ad", "")
+    text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
+    text = re.sub(r"\s*\n\s*", " ", text)
     text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
@@ -32,13 +35,33 @@ def split_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     chunks = []
     start = 0
     while start < len(text):
-        end = start + chunk_size
+        target_end = min(start + chunk_size, len(text))
+        end = target_end
+
+        if target_end < len(text):
+            search_start = start + chunk_size // 2
+            sentence_candidates = [
+                text.rfind(separator, search_start, target_end)
+                for separator in [". ", "? ", "! ", "; "]
+            ]
+            sentence_end = max(sentence_candidates)
+
+            if sentence_end != -1:
+                end = sentence_end + 1
+            else:
+                word_end = text.rfind(" ", search_start, target_end)
+                if word_end != -1:
+                    end = word_end
+
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
         if end >= len(text):
             break
-        start = end - overlap
+
+        next_start = max(0, end - overlap)
+        word_boundary = text.find(" ", next_start, min(next_start + 80, len(text)))
+        start = word_boundary + 1 if word_boundary != -1 else next_start
     return chunks
 
 

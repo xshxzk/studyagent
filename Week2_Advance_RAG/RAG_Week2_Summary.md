@@ -447,3 +447,187 @@ Unstructured 适合补充文档结构 metadata；
 但任何解析工具的输出都必须经过质量检查、清洗和评估，不能直接无脑入库。
 ```
 
+
+# Day14: Week2 系统升级 —— 真实 PDF Chunks 接入 Milvus
+
+## 1. 今日目标
+
+Day14 的目标是完成 Week2 Advanced RAG 的闭环：把 Day13 从真实 PDF 中解析出的 chunks 接入 Milvus，将 Day12 的 5 条手写测试文档升级为真实论文知识库。
+
+Day14 的工程链路：
+
+```text
+PDF
+-> PyMuPDF 解析
+-> Cleaning
+-> Sentence-aware chunking
+-> JSONL chunks
+-> Embedding
+-> Milvus Collection
+-> Vector Search
+-> 人工检查 TopK 召回质量
+```
+
+## 2. 本次新增脚本
+
+### 入库脚本
+
+```text
+day14_milvus_ingest_pdf_chunks.py
+```
+
+职责：
+
+- 读取 `parsed_outputs/day13_chunks.jsonl`。
+- 创建新的 Milvus Collection：`week2_pdf_chunks`。
+- 使用 `all-MiniLM-L6-v2` 生成 384 维向量。
+- 分批写入 PDF chunks。
+- 创建 `IVF_FLAT + COSINE` 向量索引。
+
+### 检索脚本
+
+```text
+day14_milvus_search_pdf_chunks.py
+```
+
+职责：
+
+- 连接 `week2_pdf_chunks`。
+- 使用英文测试问题生成 query embedding。
+- 执行 Milvus TopK 检索。
+- 输出 `score`、`chunk_id`、`page`、`source`、`text_length` 和文本预览。
+
+## 3. Milvus 字段设计与 Metadata 的价值
+
+本次 Collection 字段：
+
+| 字段 | 类型 | 作用 |
+| --- | --- | --- |
+| `id` | INT64 | Milvus 主键 |
+| `chunk_id` | VARCHAR | 追踪 chunk 来源与页内编号 |
+| `source` | VARCHAR | 原始 PDF 文件名 |
+| `page` | INT64 | 原文页码 |
+| `text` | VARCHAR | chunk 文本 |
+| `text_length` | INT64 | chunk 长度，用于质检 |
+| `embedding` | FLOAT_VECTOR | 语义向量，用于相似度检索 |
+
+这里的 `chunk_id`、`source`、`page`、`text_length` 就是 metadata。metadata 插入 Milvus 后很有用：
+
+- **溯源**：回答可以标明来自哪篇 PDF、第几页、哪个 chunk。
+- **过滤**：后续可以只检索某个文档、某个页码范围、某类章节。
+- **调试**：检索结果差时，可以根据 page/chunk_id 回到原文检查。
+- **评估**：可以统计 TopK 是否来自正确页、正确章节、正确文档。
+- **权限控制**：生产系统中可以按用户权限过滤不同 source/doc_type。
+
+向量字段负责“语义相似度”，metadata 字段负责“工程可控性”。生产级 RAG 不能只存 text 和 embedding。
+
+## 4. Chunking 优化记录
+
+Day13 初版使用固定字符窗口切分，暴露出两个问题：
+
+- 单词被切断，例如 `breakup` 可能变成 `b` + `reakup`。
+- PDF 换行和软连字符会造成 `con- structed`、`highresolution` 等清洗问题。
+
+Day14 对 `day13_pdf_parse_baseline.py` 做了轻量优化：
+
+```text
+清理 PDF 软连字符
+清理换行断词
+统一换行为空格
+切分时优先找句子边界
+找不到句子边界时再找单词边界
+overlap 起点尽量对齐到空格
+```
+
+重新生成后的 chunk 指标：
+
+| 指标 | Day13 初版 | Day14 优化后 |
+| --- | ---: | ---: |
+| Chunk 数量 | 148 | 162 |
+| 最短 Chunk 长度 | 140 | 134 |
+| 最长 Chunk 长度 | 900 | 899 |
+| 平均 Chunk 长度 | 848.53 | 770.83 |
+
+优化后，`breakup` 被切成 `reakup` 的问题已明显减少。仍然存在一些从半句开头的 chunk，这是 overlap 的正常副作用；后续可以进一步升级为“按完整句子 overlap”。
+
+## 5. 检索质量观察
+
+本次检索脚本把测试问题改成英文，因为当前 embedding 模型 `all-MiniLM-L6-v2` 主要适合英文语义检索。中文问题直接检索英文论文 chunks，会出现 language mismatch，导致分数偏低、召回不稳定。
+
+测试问题覆盖：
+
+```text
+OPEN-ICE algorithm steps
+satellite sensors
+Canadian Ice Service comparison
+spatial/temporal resolution motivation
+4000 lakes analysis
+```
+
+本次人工检查发现：
+
+- 英文 query 更适合当前英文 embedding 模型。
+- TopK 能召回 OPEN-ICE 流程、传感器、CIS 对比、4000 lakes 等相关上下文。
+- 部分 chunk 仍包含作者名、期刊信息、图注、引用等噪声。
+- 单纯向量检索还不够稳定，后续需要结合 BM25、Rerank 和 metadata filter。
+
+## 6. Week2 完整技术链路
+
+Week2 从基础 RAG 升级到了更接近生产的 Advanced RAG：
+
+```text
+Query Transformation
+-> Hybrid Search
+-> Rerank
+-> RAGAs Evaluation
+-> Milvus Vector DB
+-> Complex PDF Parsing
+-> Real PDF Chunk Ingestion
+-> Milvus Search Validation
+```
+
+本周真正形成的工程认知是：
+
+```text
+RAG 效果差，不一定是模型差；
+可能是 parser、cleaning、chunking、embedding language mismatch、metadata 设计的问题。
+```
+
+各环节定位：
+
+| 环节 | 作用 | 常见问题 |
+| --- | --- | --- |
+| Parser | 从 PDF/网页/Word 中抽取内容 | 乱码、漏页、表格丢失、版面顺序错乱 |
+| Cleaning | 清洗抽取出的脏文本 | 页眉页脚、断词、引用、版权信息噪声 |
+| Chunking | 切成适合检索的语义块 | 太短、太长、切断单词、上下文不完整 |
+| Embedding | 把 query 和 chunk 转成向量 | 中英文不匹配、模型维度不一致 |
+| Metadata | 让检索可过滤、可追踪、可评估 | 无页码、无来源、无法权限过滤 |
+| Vector DB | 服务化存储和搜索向量 | 索引参数、字段设计、数据更新策略 |
+| Rerank/Eval | 提升排序质量并量化效果 | 评估集不足、成本和延迟增加 |
+
+## 7. 后续学习建议
+
+进入 Week3 Agent 之前，建议保留 Week2 的工程资产：
+
+- `day13_chunks.jsonl` 作为真实 PDF chunks 样例，但不要提交到 Git。
+- `week2_pdf_chunks` 作为 Milvus 中的真实论文 Collection。
+- `day14_milvus_ingest_pdf_chunks.py` 作为离线入库脚本模板。
+- `day14_milvus_search_pdf_chunks.py` 作为在线检索脚本模板。
+
+后续优化方向：
+
+1. **Chunking 升级**：用段落/句子级 chunking，过滤 References 和 Header/Footer。
+2. **多语言检索**：如果希望中文问英文论文，换多语言 embedding 或做 query translation。
+3. **Hybrid + Rerank 接入 Milvus**：先 Milvus 召回 TopK，再用 BM25/RRF/Reranker 优化排序。
+4. **Metadata Filter**：增加 `section_title`、`doc_type`、`is_reference` 等字段，让检索更可控。
+5. **RAGAs 复测**：用真实 PDF chunks 对比优化前后的 Context Precision、Context Recall、Faithfulness。
+6. **Week3 Agent 衔接**：把这个 RAG 检索能力封装成 Agent Tool，让 Agent 能调用论文知识库回答问题。
+
+Week3 开始进入 Agent 开发时，不建议从零开始。更好的路线是：
+
+```text
+先把 Week2 的 Milvus PDF 检索封装成一个 tool
+-> 再学习 ReAct / Tool Calling
+-> 最后做 RAG + Tool Calling 的研究助手 Agent
+```
+
